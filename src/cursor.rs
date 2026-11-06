@@ -143,6 +143,11 @@ pub fn trim_trailing_ows(mut bytes: &[u8]) -> &[u8] {
 }
 
 // a zero-copy byte reader that tracks the current byte offset into an input buffer
+//
+// a zero-copy byte cursor is a way of parsing data where you move through an existing byte buffer
+// using an index, without copying the bytes into new buffers or strings
+//
+// A cursor maintains a position (pos) indicating where you are currently reading.
 #[derive(Debug, Clone, Copy)]
 pub struct Cursor<'buf> {
     buf: &'buf [u8],
@@ -219,6 +224,11 @@ impl<'buf> Cursor<'buf> {
         let b = self.buf.get(self.pos).copied()?;
         self.pos += 1;
         Some(b)
+    }
+
+    #[inline]
+    pub fn advance(&mut self, n: usize) {
+        self.pos = (self.pos + n).min(self.buf.len());
     }
 
     #[inline]

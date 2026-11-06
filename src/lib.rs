@@ -3,6 +3,21 @@
 
 pub mod cursor;
 pub mod error;
+pub mod start_line;
+
+// pub mod error; -> Exposes the module publicly
+// use crate::error::ParseError -> Imports the tyep into the current scope
+// pub use crate::error::ParseError -> Re-exports the type publicly
+//
+// What does pub mod error actually do ?
+// 1. Declares error as module
+// 2. Makes that module publicly accessible outside your crate
+// 3. Allows access to its publicly exposed items, subject to their visibility
+//
+// for example, another crate can write:
+//
+// use http_parser::error::ParseError;
+// let err = ParseError::new();
 
 pub use error::{ParseError, ParseResult, Status};
 
