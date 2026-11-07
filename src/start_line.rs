@@ -289,3 +289,169 @@ pub fn parse_request_line<'buf>(
         consumed: cursor.pos(),
     })
 }
+
+// parse an HTTP/1.x response status-line from the beginning of 'buf'
+pub fn parse_status_line<'buf>(
+    buf: &'buf [u8],
+    config: &ParserConfig,
+) -> ParseResult<StatusLine<'buf>> {
+    let mut cursor = Cursor::new(buf);
+
+    // 1. http version
+    let version_offset = cursor.pos();
+    let version = match parse_version(&mut cursor)? {
+        Status::Complete { value, .. } => value,
+        Status::Partial => return Ok(Status::Partial),
+    };
+
+    // SP after http version
+    match cursor.next_byte() {
+        None => return Ok(Status::Partial),
+        Some(b' ') => {}
+        Some(_) => {
+            return Err(ParseError::InvalidVersion {
+                offset: version_offset,
+            });
+        }
+    }
+
+    //2. parse 3-digit status-code followed by a single SP
+    let code_offset = cursor.pos();
+    let rem = cursor.remaining();
+    for &b in rem.iter().take(3) {
+        if !b.is_ascii_digit() {
+            return Err(ParseError::InvalidStatusCode {
+                offset: code_offset,
+            });
+        }
+    }
+    if rem.len() < 3 {
+        return Ok(Status::Partial);
+    }
+
+    //first digit of an http status code cannot be '0'
+    if rem[0] == b'0' {
+        return Err(ParseError::InvalidStatusCode {
+            offset: code_offset,
+        });
+    }
+
+    let status_code =
+        u16::from(rem[0] - b'0') * 100 + u16::from(rem[1] - b'0') * 10 + u16::from(rem[2] - b'0');
+    cursor.advance(3);
+
+    // require single SP after status-code
+    match cursor.next_byte() {
+        None => return Ok(Status::Partial),
+        Some(b' ') => {}
+        Some(_) => {
+            return Err(ParseError::InvalidStatusCode {
+                offset: code_offset,
+            });
+        }
+    }
+
+    //3. parse optional reason-phrase (*header_value_byte) upto CRLF
+    let reson_start = cursor.pos();
+    loop {
+        match cursor.peek() {
+            None => return Ok(Status::Partial),
+            Some(b'\r' | b'\n') => break,
+            Some(b) if is_header_value_byte(b) => {
+                cursor.advance(1);
+                if cursor.pos() > config.max_header_block_bytes {
+                    return Err(ParseError::HeaderBlockTooLarge {
+                        max_allowed: config.max_header_block_bytes,
+                    });
+                }
+            }
+            Some(b) => {
+                return Err(ParseError::InvalidHeaderValue {
+                    offset: cursor.pos(),
+                    byte: b,
+                });
+            }
+        }
+    }
+
+    let reason = cursor.slice_from(reson_start);
+    if cursor.consume_newline(config.allow_bare_lf)?.is_partial() {
+        return Ok(Status::Partial);
+    }
+
+    if cursor.pos() > config.max_header_block_bytes {
+        return Err(ParseError::HeaderBlockTooLarge {
+            max_allowed: config.max_header_block_bytes,
+        });
+    }
+
+    Ok(Status::Complete {
+        value: StatusLine {
+            version,
+            status_code,
+            reason,
+        },
+        consumed: cursor.pos(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_standard_and_custom_request_lines() {
+        let config = ParserConfig::strict();
+
+        let raw = b"GET /api/v1/users?page=2 HTTP/1.1\r\nHost: example.com\r\n";
+        let res = parse_request_line(raw, &config).unwrap();
+        assert_eq!(
+            res,
+            Status::Complete {
+                value: RequestLine {
+                    method: Method::Get,
+                    target: "/api/v1/users?page=2",
+                    version: Version::Http11
+                },
+                consumed: raw.len()
+            }
+        );
+
+        assert!(Method::Get.is_safe());
+        assert!(Method::Get.is_idempotent());
+        assert!(!Method::Post.is_idempotent());
+
+        let webdav = b"PROPFIND /dav/files HTTP/1.0\r\n";
+        let res = parse_request_line(webdav, &config).unwrap();
+        assert_eq!(
+            res,
+            Status::Complete {
+                value: RequestLine {
+                    method: Method::Custom("PROPFIND"),
+                    target: "/dav/files",
+                    version: Version::Http10,
+                },
+                consumed: webdav.len()
+            }
+        );
+    }
+
+    #[test]
+    fn request_line_handles_every_byte_boundary_incrementally() {
+        let config = ParserConfig::strict();
+        let full = b"POST /submit HTTP/1.1\r\n";
+
+        //every prefix before the final \n must return Ok(Status::Partial)
+        for cut in 0..full.len() - 1 {
+            let prefix = &full[..cut];
+            assert_eq!(
+                parse_request_line(prefix, &config),
+                Ok(Status::Partial),
+                "expected Partial for prefix of len {cut}: {:?}",
+                core::str::from_utf8(prefix)
+            );
+        }
+
+        assert!(parse_request_line(full, &config).unwrap().is_complete());
+    }
+}

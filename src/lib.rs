@@ -45,6 +45,19 @@ impl Default for ParserConfig {
     }
 }
 
+impl ParserConfig {
+    // creates a new default strict configuration
+    #[inline]
+    pub const fn strict() -> Self {
+        Self {
+            max_method_len: 16,
+            max_uri_len: 8 * 1024,
+            max_header_block_bytes: 64 * 1024,
+            allow_bare_lf: false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
