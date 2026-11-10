@@ -20,6 +20,9 @@ pub mod start_line;
 // let err = ParseError::new();
 
 pub use error::{ParseError, ParseResult, Status};
+pub use start_line::{
+    parse_request_line, parse_status_line, Method, RequestLine, StatusLine, Version
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParserConfig {

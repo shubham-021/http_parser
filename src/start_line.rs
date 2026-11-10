@@ -413,7 +413,7 @@ mod tests {
                     target: "/api/v1/users?page=2",
                     version: Version::Http11
                 },
-                consumed: raw.len()
+                consumed: 35
             }
         );
 
@@ -453,5 +453,122 @@ mod tests {
         }
 
         assert!(parse_request_line(full, &config).unwrap().is_complete());
+    }
+
+    #[test]
+    fn request_line_rejects_malformed_inputs_and_enforces_limits() {
+        let mut config = ParserConfig::strict();
+        config.max_method_len = 8;
+        config.max_uri_len = 16;
+
+        // 1. empty method
+        assert_eq!(
+            parse_request_line(b" / HTTP/1.1\r\n", &config),
+            Err(ParseError::InvalidMethod { offset: 0 })
+        );
+        assert_eq!(
+            parse_request_line(b"\r\n", &config),
+            Err(ParseError::InvalidMethod { offset: 0 })
+        );
+
+        // 2. method exceeds max_method_len even before space arrives
+        assert_eq!(
+            parse_request_line(b"SUPERLONGMETHOD", &config),
+            Err(ParseError::InvalidMethod { offset: 0 })
+        );
+
+        // 3. Double space between method and target (empty target)
+        assert_eq!(
+            parse_request_line(b"GET  / HTTP/1.1\r\n", &config),
+            Err(ParseError::InvalidRequestTarget { offset: 4 })
+        );
+
+        // 4. target exceeds max_uri_len
+        assert_eq!(
+            parse_request_line(b"GET /this/path/is/way/too/long HTTP/1.1\r\n", &config),
+            Err(ParseError::InvalidRequestTarget { offset: 4 })
+        );
+
+        // 5. Invalid byte in target (unescaped space or NUL byte)
+        assert_eq!(
+            parse_request_line(b"GET /bad\0path HTTP/1.1\r\n", &config),
+            Err(ParseError::InvalidRequestTarget { offset: 8 })
+        );
+
+        // 6. Invalid HTTP version fails fast even without CRLF
+        assert_eq!(
+            parse_request_line(b"GET / HTTP/2.0\r\n", &config),
+            Err(ParseError::InvalidVersion { offset: 6 })
+        );
+
+        assert_eq!(
+            parse_request_line(b"GET / http/1.1 \r\n", &config),
+            Err(ParseError::InvalidVersion { offset: 6})
+        );
+
+        assert_eq!(
+            parse_request_line(b"GET / HTTP/1.1 \r\n", &config),
+            Err(ParseError::InvalidVersion { offset: 6})
+        );
+    }
+
+    #[test]
+    fn parses_status_line_including_empty_reason_phrase() {
+        let config = ParserConfig::strict();
+
+        let ok_raw = b"HTTP/1.1 200 OK\r\n";
+        let res = parse_status_line(ok_raw, &config).unwrap();
+        assert_eq!(
+            res,
+            Status::Complete {
+                value: StatusLine {
+                    version: Version::Http11,
+                    status_code: 200,
+                    reason: b"OK",
+                },
+                consumed: ok_raw.len()
+            }
+        );
+
+        // rfc 9112 allows an empty reason-phrase after the space: "HTTP/1.1 204 \r\n"
+        let empty_reason = b"HTTP/1.1 204 \r\n";
+        let res = parse_status_line(empty_reason, &config).unwrap();
+        assert_eq!(
+            res,
+            Status::Complete {
+                value: StatusLine {
+                    version: Version::Http11,
+                    status_code: 204,
+                    reason: b"",
+                },
+                consumed: empty_reason.len()
+            }
+        )
+    }
+
+    #[test]
+    fn status_line_rejects_bad_codes_and_streams_cleanly() {
+        let config = ParserConfig::strict();
+        let full = b"HTTP/1.0 404 Not Found\r\n";
+
+        for cut in 0..full.len() - 1 {
+            assert_eq!(parse_status_line(&full[..cut], &config), Ok(Status::Partial));
+        }
+
+        // status coed starting with 0 or non-digit or 4 digits must fail
+        assert_eq!(
+            parse_status_line(b"HTTP/1.1 099 OK\r\n", &config),
+            Err(ParseError::InvalidStatusCode { offset: 9 })
+        );
+
+        assert_eq!(
+            parse_status_line(b"HTTP/1.1 2000 OK\r\n", &config),
+            Err(ParseError::InvalidStatusCode { offset: 9 })
+        );
+
+        assert_eq!(
+            parse_status_line(b"HTTP/1.1 20A OK\r\n", &config),
+            Err(ParseError::InvalidStatusCode { offset: 9 })
+        );
     }
 }
